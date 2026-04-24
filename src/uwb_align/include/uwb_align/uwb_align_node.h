@@ -13,21 +13,20 @@
 namespace uwb_align {
 
 /**
- * @brief UWB 对准控制节点（EKF 融合版）
+ * @brief UWB 对准控制节点（两阶段版）
  *
- * 订阅 robot_localization ekf_node 输出的 /odometry/filtered，
- * 其中包含经过 EKF 融合（UWB 位置 + IMU 角速度）后的平滑估计：
- *   pose.position.x  —— 横向偏移（相对于双基站中点，右正左负）
- *   pose.position.y  —— 前向距离（到中点的距离）
- *   pose.orientation —— 当前航向（由 IMU 角速度积分得到）
- *   twist.angular.z  —— 当前航向角速度（来自 IMU）
+ * ── 阶段一：UWB 对准（y > final_dist_m）──────────────────────────
+ *   linear.x  = clamp(Kp_fwd * (y - final_dist_m), 0, max_linear)
+ *               距离越近速越慢，到 final_dist_m 处速度自然减为 0
+ *   angular.z = clamp(Kp_yaw * yaw_err - Kd_yaw * omega_z, ±max_angular)
+ *   yaw_err   = normalizeAngle(atan2(x, y) - cur_yaw)
  *
- * 控制律
- * ------
- *   desired_yaw   = atan2(-x, y)          # 指向目标中点所需朝向
- *   yaw_error     = desired_yaw - current_yaw
- *   angular.z     = clamp(Kp_yaw * yaw_error - Kd_yaw * omega_z, ±max_angular)
- *   linear.x      = clamp(Kp_fwd * (y - stop_dist) * cos(yaw_error), 0, max_linear)
+ * ── 阶段二：IMU 恒速末段（y ≤ final_dist_m）─────────────────────
+ *   进入此阶段时记录当前航向 final_yaw_，之后只用 IMU 保持直行
+ *   linear.x  = linear_speed（恒定，默认 0.3 m/s）
+ *   angular.z = clamp(Kp_yaw * yaw_err - Kd_yaw * omega_z, ±max_angular)
+ *               yaw_err = normalizeAngle(final_yaw_ - cur_yaw)
+ *   持续 final_duration_s 秒（= final_dist_m / linear_speed * 安全系数）后停止
  *
  * 话题
  * ----
@@ -54,15 +53,16 @@ private:
     rclcpp::TimerBase::SharedPtr control_timer_;
 
     // ---- 参数 ----
-    double stop_dist_m_     = 0.5;   ///< 前向距离小于此值则停止 (m)
-    double align_thresh_m_  = 0.05;  ///< 横向误差小于此值视为对准完成 (m)
-    double yaw_Kp_          = 1.5;   ///< 航向误差 P 增益
-    double yaw_Kd_          = 0.2;   ///< 航向误差 D 增益（抑制振荡）
-    double fwd_Kp_          = 0.4;   ///< 前进 P 增益
-    double max_linear_      = 0.3;   ///< 最大线速度 (m/s)
-    double max_angular_     = 0.8;   ///< 最大角速度 (rad/s)
-    double control_freq_    = 20.0;  ///< 控制频率 (Hz)
-    double data_timeout_s_  = 0.5;   ///< 数据超时急停阈值 (s)
+    double final_dist_m_     = 1.0;   ///< UWB阶段结束/IMU阶段开始的前向距离 (m)
+    double linear_speed_     = 0.3;   ///< IMU恒速阶段的前进速度 (m/s)
+    double final_duration_s_ = 0.0;   ///< IMU阶段持续时间 (s)，0=自动计算
+    double fwd_Kp_           = 0.4;   ///< UWB阶段前进 P 增益
+    double max_linear_       = 0.4;   ///< UWB阶段最大线速度 (m/s)
+    double yaw_Kp_           = 1.5;   ///< 航向误差 P 增益（两阶段共用）
+    double yaw_Kd_           = 0.2;   ///< 航向误差 D 增益（两阶段共用）
+    double max_angular_      = 0.8;   ///< 最大角速度 (rad/s)
+    double control_freq_     = 20.0;  ///< 控制频率 (Hz)
+    double data_timeout_s_   = 0.5;   ///< 数据超时急停阈值 (s)
 
     // ---- 状态（受 mutex_ 保护）----
     std::mutex mutex_;
@@ -74,8 +74,13 @@ private:
     rclcpp::Time last_data_time_;
     bool   time_init_   = false;
 
-    enum class AlignState { ROTATING, ADVANCING, ALIGNED };
-    AlignState state_ = AlignState::ROTATING;
+    // 阶段二状态
+    double           final_yaw_         = 0.0;   ///< 进入IMU阶段时锁定的目标航向
+    rclcpp::Time     final_start_time_;           ///< 进入IMU阶段的时刻
+    bool             in_final_phase_    = false;  ///< 是否处于IMU恒速阶段
+
+    enum class AlignState { UWB_ALIGN, IMU_FINAL, ALIGNED };
+    AlignState state_ = AlignState::UWB_ALIGN;
 };
 
 }  // namespace uwb_align

@@ -6,18 +6,33 @@ uwb_pose_node:
     separation_m: 2.0              # 两基站间距 W，单位：米
     range_idx_a:  0                # 基站 A 对应 RANGE0（需与实际硬件匹配）
     range_idx_b:  1                # 基站 B 对应 RANGE1
-    cov_xy:       0.04             # UWB 测量误差方差 (m²)，σ≈0.2m；信号好时可调小
+    tag_dist_m:   0.5              # 两标签轴距 L，单位：米（量测实际安装距离）
+    tag0_id:      0                # 车头标签 short ID（aT:A 中的 T）
+    tag1_id:      1                # 车尾标签 short ID
+    cov_xy:       0.04             # UWB x/y 测量误差方差 (m²)，σ≈0.2m
+    cov_yaw:      0.02             # UWB 航向方差 (rad²)，σ≈8°
+    data_age_s:   0.1              # 两帧数据允许的最大时间差 (s)
     frame_id:     "alignment_frame"
 
 # UWB 对准控制器参数
 uwb_align_controller:
   ros__parameters:
-    stop_dist_m:    0.5    # 前向距离小于此值停止（小车停在距中点 0.5m 处，单位：m）
-    align_thresh_m: 0.05   # 横向误差小于此值视为对准完成（±5cm）
-    yaw_Kp:         1.5    # 航向误差 P 增益（调大 → 转向更积极，过大会振荡）
-    yaw_Kd:         0.2    # 航向误差 D 增益（抑制振荡，建议从 0 开始调大）
-    fwd_Kp:         0.4    # 前进速度 P 增益
-    max_linear:     0.3    # 最大线速度 (m/s)
-    max_angular:    0.8    # 最大角速度 (rad/s)
-    control_freq:   20.0   # 控制频率 (Hz)
-    data_timeout_s: 0.5    # EKF 数据超时急停阈值 (s)
+    # 阶段切换距离
+    final_dist_m:     1.0    # y 小于此值时从 UWB 阶段切换到 IMU 恒速末段 (m)
+
+    # 阶段一：UWB 变速对准
+    fwd_Kp:           0.4    # 前进速度 P 增益，linear_x = Kp*(y - final_dist_m)
+    max_linear:       0.4    # UWB 阶段最大线速度 (m/s)
+
+    # 阶段二：IMU 恒速末段
+    linear_speed:     0.3    # 恒速前进速度，固定不变 (m/s)
+    final_duration_s: 0.0    # IMU 末段持续时间 (s)，0=自动计算(final_dist/speed*1.3)
+
+    # 两阶段共用转向参数
+    yaw_Kp:           1.5    # 航向误差 P 增益（调大→转向更快，过大会振荡）
+    yaw_Kd:           0.2    # 航向误差 D 增益（抑制转向振荡）
+    max_angular:      0.8    # 最大角速度 (rad/s)
+
+    # 系统参数
+    control_freq:     20.0   # 控制频率 (Hz)
+    data_timeout_s:   0.5    # EKF 数据超时急停阈值 (s)

@@ -40,8 +40,10 @@ UwbAlignController::UwbAlignController(const rclcpp::NodeOptions& options)
     RCLCPP_INFO(get_logger(), "订阅: /odometry/filtered");
     RCLCPP_INFO(get_logger(), "发布: /cmd_vel, /uwb_align/status");
     RCLCPP_INFO(get_logger(),
-        "参数: stop_dist=%.2fm align_thresh=%.3fm yaw_Kp=%.2f yaw_Kd=%.2f fwd_Kp=%.2f",
-        stop_dist_m_, align_thresh_m_, yaw_Kp_, yaw_Kd_, fwd_Kp_);
+        "参数: final_dist=%.1fm linear_speed=%.2fm/s final_duration=%.1fs"
+        " fwd_Kp=%.2f max_linear=%.2f yaw_Kp=%.2f yaw_Kd=%.2f",
+        final_dist_m_, linear_speed_, final_duration_s_,
+        fwd_Kp_, max_linear_, yaw_Kp_, yaw_Kd_);
 }
 
 UwbAlignController::~UwbAlignController()
@@ -51,25 +53,32 @@ UwbAlignController::~UwbAlignController()
 
 void UwbAlignController::DeclareAndLoadParams()
 {
-    declare_parameter<double>("stop_dist_m",    0.5);
-    declare_parameter<double>("align_thresh_m", 0.05);
-    declare_parameter<double>("yaw_Kp",         1.5);
-    declare_parameter<double>("yaw_Kd",         0.2);
-    declare_parameter<double>("fwd_Kp",         0.4);
-    declare_parameter<double>("max_linear",     0.3);
-    declare_parameter<double>("max_angular",    0.8);
-    declare_parameter<double>("control_freq",   20.0);
-    declare_parameter<double>("data_timeout_s", 0.5);
+    declare_parameter<double>("final_dist_m",     1.0);
+    declare_parameter<double>("linear_speed",     0.3);
+    declare_parameter<double>("final_duration_s", 0.0);   // 0 = 自动计算
+    declare_parameter<double>("fwd_Kp",           0.4);
+    declare_parameter<double>("max_linear",       0.4);
+    declare_parameter<double>("yaw_Kp",           1.5);
+    declare_parameter<double>("yaw_Kd",           0.2);
+    declare_parameter<double>("max_angular",      0.8);
+    declare_parameter<double>("control_freq",     20.0);
+    declare_parameter<double>("data_timeout_s",   0.5);
 
-    stop_dist_m_    = get_parameter("stop_dist_m").as_double();
-    align_thresh_m_ = get_parameter("align_thresh_m").as_double();
-    yaw_Kp_         = get_parameter("yaw_Kp").as_double();
-    yaw_Kd_         = get_parameter("yaw_Kd").as_double();
-    fwd_Kp_         = get_parameter("fwd_Kp").as_double();
-    max_linear_     = get_parameter("max_linear").as_double();
-    max_angular_    = get_parameter("max_angular").as_double();
-    control_freq_   = get_parameter("control_freq").as_double();
-    data_timeout_s_ = get_parameter("data_timeout_s").as_double();
+    final_dist_m_     = get_parameter("final_dist_m").as_double();
+    linear_speed_     = get_parameter("linear_speed").as_double();
+    final_duration_s_ = get_parameter("final_duration_s").as_double();
+    fwd_Kp_           = get_parameter("fwd_Kp").as_double();
+    max_linear_       = get_parameter("max_linear").as_double();
+    yaw_Kp_           = get_parameter("yaw_Kp").as_double();
+    yaw_Kd_           = get_parameter("yaw_Kd").as_double();
+    max_angular_      = get_parameter("max_angular").as_double();
+    control_freq_     = get_parameter("control_freq").as_double();
+    data_timeout_s_   = get_parameter("data_timeout_s").as_double();
+
+    // 自动计算 IMU 阶段持续时间：距离 / 速度 * 1.3 安全系数
+    if (final_duration_s_ <= 0.0) {
+        final_duration_s_ = (final_dist_m_ / linear_speed_) * 1.3;
+    }
 }
 
 // ---- EKF 里程计回调 ----
@@ -112,59 +121,91 @@ void UwbAlignController::ControlLoop()
         return;
     }
 
-    const double x    = pos_x_;   // 横向偏移 (m)，右正左负
-    const double y    = pos_y_;   // 前向距离 (m)
-    const double yaw  = cur_yaw_; // 当前航向 (rad)，由 EKF 维护
-    const double w_z  = omega_z_; // 当前角速度 (rad/s)
+    const double x   = pos_x_;
+    const double y   = pos_y_;
+    const double yaw = cur_yaw_;
+    const double w_z = omega_z_;
 
-    // 已对准且到位
-    if (y < stop_dist_m_ && std::fabs(x) < align_thresh_m_) {
-        if (state_ != AlignState::ALIGNED) {
+    // ================================================================
+    // 阶段二：IMU 恒速末段（y 已进入 final_dist_m 范围）
+    // ================================================================
+    if (state_ == AlignState::IMU_FINAL) {
+        double elapsed = (now() - final_start_time_).seconds();
+        if (elapsed >= final_duration_s_) {
             state_ = AlignState::ALIGNED;
             RCLCPP_INFO(get_logger(),
-                "✓ 对准完成: x=%.3fm, y=%.3fm", x, y);
+                "IMU 末段完成 (%.1fs)，全程对准结束", elapsed);
+            PublishStop();
+            PublishStatus("ALIGNED");
+            return;
         }
+
+        // 维持进入末段时锁定的航向，恒速前进
+        const double yaw_err = normalizeAngle(final_yaw_ - yaw);
+        double angular_z = yaw_Kp_ * yaw_err - yaw_Kd_ * w_z;
+        angular_z = std::clamp(angular_z, -max_angular_, max_angular_);
+
+        geometry_msgs::msg::Twist cmd;
+        cmd.linear.x  = linear_speed_;
+        cmd.angular.z = angular_z;
+        cmd_vel_pub_->publish(cmd);
+
+        char buf[128];
+        std::snprintf(buf, sizeof(buf),
+            "IMU_FINAL t=%.1f/%.1fs yaw_err=%.1f° vx=%.2f wz=%.2f",
+            elapsed, final_duration_s_,
+            yaw_err * 180.0 / M_PI, linear_speed_, angular_z);
+        PublishStatus(buf);
+        RCLCPP_DEBUG(get_logger(), "%s", buf);
+        return;
+    }
+
+    // ALIGNED 状态保持停止
+    if (state_ == AlignState::ALIGNED) {
         PublishStop();
         PublishStatus("ALIGNED");
         return;
     }
-    state_ = (std::fabs(x) > align_thresh_m_) ? AlignState::ROTATING
-                                               : AlignState::ADVANCING;
 
-    // 期望朝向: 指向中点 (0, 0) 的方向
-    //   desired_yaw = atan2(-x, y)
-    //     当 x>0（偏右），需要向左转，desired_yaw 为负
-    //     当 x<0（偏左），需要向右转，desired_yaw 为正
-    const double desired_yaw = std::atan2(-x, y);
+    // ================================================================
+    // 阶段一：UWB 对准阶段（变速 + PD 转向）
+    // ================================================================
+
+    // 切换到阶段二
+    if (y <= final_dist_m_) {
+        state_            = AlignState::IMU_FINAL;
+        final_yaw_        = yaw;
+        final_start_time_ = now();
+        RCLCPP_INFO(get_logger(),
+            "切入 IMU 末段: y=%.3fm (≤%.1fm)，锁定航向 %.2f rad，"
+            "恒速 %.2fm/s 持续 %.1fs",
+            y, final_dist_m_, final_yaw_, linear_speed_, final_duration_s_);
+        return;
+    }
+    state_ = AlignState::UWB_ALIGN;
+
+    // 期望朝向：alignment_frame 中 yaw=0 即车头正对基站连线法线（y轴方向）
+    // EKF yaw 已由 UWB 双标签直接测量，无需从位置几何反算
+    const double desired_yaw = 0.0;
     const double yaw_err     = normalizeAngle(desired_yaw - yaw);
 
-    // PD 角速度控制
     double angular_z = yaw_Kp_ * yaw_err - yaw_Kd_ * w_z;
     angular_z = std::clamp(angular_z, -max_angular_, max_angular_);
 
-    // 前进：仅当航向基本对准时才前进，避免斜向运动
-    double linear_x = 0.0;
-    if (std::fabs(yaw_err) < M_PI / 6.0) {  // 航向误差 < 30°
-        linear_x = fwd_Kp_ * std::max(0.0, y - stop_dist_m_);
-        linear_x *= std::cos(yaw_err);       // 投影到前进方向
-        linear_x = std::clamp(linear_x, 0.0, max_linear_);
-    }
+    // 变速前进：距 final_dist_m 越近速越小，到达时自然归零
+    double linear_x = fwd_Kp_ * (y - final_dist_m_);
+    linear_x = std::clamp(linear_x, 0.0, max_linear_);
 
     geometry_msgs::msg::Twist cmd;
     cmd.linear.x  = linear_x;
     cmd.angular.z = angular_z;
     cmd_vel_pub_->publish(cmd);
 
-    // 状态字符串
     char buf[128];
     std::snprintf(buf, sizeof(buf),
-        "state=%s x=%.3fm y=%.3fm yaw_err=%.2f° vx=%.2f wz=%.2f",
-        (state_ == AlignState::ROTATING) ? "ROTATING" : "ADVANCING",
-        x, y,
-        yaw_err * 180.0 / M_PI,
-        linear_x, angular_z);
+        "UWB_ALIGN x=%.3fm y=%.3fm yaw_err=%.1f° vx=%.2f wz=%.2f",
+        x, y, yaw_err * 180.0 / M_PI, linear_x, angular_z);
     PublishStatus(buf);
-
     RCLCPP_DEBUG(get_logger(), "%s", buf);
 }
 

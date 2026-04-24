@@ -41,6 +41,8 @@ ament_target_dependencies(uwb_pose_node
   rclcpp
   geometry_msgs
   std_msgs
+  tf2
+  tf2_geometry_msgs
 )
 
 # ---- 对准控制节点（订阅 EKF 输出 → /cmd_vel）----

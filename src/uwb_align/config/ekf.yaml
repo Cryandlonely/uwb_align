@@ -79,7 +79,7 @@ ekf_node:
     pose0: /uwb/pose
     pose0_config: [
       true,  true,  false,    # 使用 x, y；不使用 z
-      false, false, false,    # 不使用 roll, pitch, yaw（由 IMU 提供）
+      false, false, true,     # 使用 yaw（双标签直接提供）
       false, false, false,    # 不使用速度
       false, false, false,    # 不使用角速度
       false, false, false     # 不使用加速度
