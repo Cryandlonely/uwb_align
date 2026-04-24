@@ -1,0 +1,23 @@
+# UWB 位姿节点参数
+uwb_pose_node:
+  ros__parameters:
+    serial_port:  "/dev/ttyUSB0"   # UWB 模块串口路径
+    baud_rate:    460800           # 波特率 (8N1，无流控)
+    separation_m: 2.0              # 两基站间距 W，单位：米
+    range_idx_a:  0                # 基站 A 对应 RANGE0（需与实际硬件匹配）
+    range_idx_b:  1                # 基站 B 对应 RANGE1
+    cov_xy:       0.04             # UWB 测量误差方差 (m²)，σ≈0.2m；信号好时可调小
+    frame_id:     "alignment_frame"
+
+# UWB 对准控制器参数
+uwb_align_controller:
+  ros__parameters:
+    stop_dist_m:    0.5    # 前向距离小于此值停止（小车停在距中点 0.5m 处，单位：m）
+    align_thresh_m: 0.05   # 横向误差小于此值视为对准完成（±5cm）
+    yaw_Kp:         1.5    # 航向误差 P 增益（调大 → 转向更积极，过大会振荡）
+    yaw_Kd:         0.2    # 航向误差 D 增益（抑制振荡，建议从 0 开始调大）
+    fwd_Kp:         0.4    # 前进速度 P 增益
+    max_linear:     0.3    # 最大线速度 (m/s)
+    max_angular:    0.8    # 最大角速度 (rad/s)
+    control_freq:   20.0   # 控制频率 (Hz)
+    data_timeout_s: 0.5    # EKF 数据超时急停阈值 (s)

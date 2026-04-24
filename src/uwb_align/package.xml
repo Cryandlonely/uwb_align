@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>uwb_align</name>
+  <version>1.0.0</version>
+  <description>
+    UWB 辅助小车对准节点 —— 读取 UWB 模块串口数据（TOF 协议），
+    融合雷达内置 IMU（/livox/imu），驱动底盘对准双基站连线中点。
+  </description>
+  <maintainer email="lonely@dev.com">lonely</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_geometry_msgs</depend>
+
+  <!-- robot_localization 用于 EKF 融合 UWB + IMU -->
+  <exec_depend>robot_localization</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
